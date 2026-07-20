@@ -1,0 +1,103 @@
+function SDRTelemetryPlugin() {
+    return function install(openmct) {
+        // 1. Define our custom Satellite Object Type
+        openmct.types.addType('sdr.telemetry', {
+            name: 'SDR Satellite Parameter',
+            description: 'Telemetry parameter received from NooElec RTL-SDR.',
+            cssClass: 'icon-telemetry'
+        });
+
+        // Define our Telemetry Dictionary structure
+        const telemetryDictionary = {
+            name: 'NooElec Satellite Station',
+            identifier: { namespace: 'sdr.spacecraft', key: 'satellite' },
+            measurements: [
+                { key: 'rssi', name: 'Signal Strength (RSSI)', units: 'dB', format: 'float' },
+                { key: 'battery_voltage', name: 'Battery Voltage', units: 'V', format: 'float' },
+                { key: 'panel_temp', name: 'Solar Panel Temp', units: '°C', format: 'float' },
+                { key: 'altitude', name: 'Orbital Altitude', units: 'km', format: 'float' }
+            ]
+        };
+
+        // 2. Register the Root Object in the left-hand tree sidebar
+        openmct.objects.addRoot({
+            namespace: 'sdr.spacecraft',
+            key: 'satellite'
+        });
+
+        // 3. Object Provider: Returns the metadata for our satellite parameters
+        openmct.objects.addProvider('sdr.spacecraft', {
+            get: function (identifier) {
+                if (identifier.key === 'satellite') {
+                    return Promise.resolve({
+                        identifier: identifier,
+                        name: telemetryDictionary.name,
+                        type: 'folder',
+                        location: 'ROOT'
+                    });
+                }
+
+                const measurement = telemetryDictionary.measurements.find(m => m.key === identifier.key);
+                if (measurement) {
+                    return Promise.resolve({
+                        identifier: identifier,
+                        name: measurement.name,
+                        type: 'sdr.telemetry',
+                        telemetry: {
+                            values: [
+                                { key: 'value', name: 'Value', units: measurement.units, format: measurement.format, hints: { y: 1 } },
+                                { key: 'utc', name: 'Timestamp', format: 'utc', hints: { x: 1 } }
+                            ]
+                        },
+                        location: 'sdr.spacecraft:satellite'
+                    });
+                }
+            }
+        });
+
+        // Composition Provider: Loads individual measurements under the folder
+        openmct.composition.addProvider({
+            appliesTo: function (domainObject) {
+                return domainObject.identifier.namespace === 'sdr.spacecraft' && domainObject.identifier.key === 'satellite';
+            },
+            load: function (domainObject) {
+                return Promise.resolve(telemetryDictionary.measurements.map(m => ({
+                    namespace: 'sdr.spacecraft',
+                    key: m.key
+                })));
+            }
+        });
+
+        // 4. Connect Open MCT's Telemetry pipeline to our Tornado Python WebSocket
+        const socket = new WebSocket('ws://localhost:8082/telemetry');
+        const listeners = {};
+
+        socket.onmessage = function (event) {
+            const data = JSON.parse(event.data);
+            
+            // Loop through each received key and notify Open MCT
+            Object.keys(data).forEach(key => {
+                if (listeners[key]) {
+                    listeners[key]({
+                        id: key,
+                        value: data[key],
+                        utc: data.timestamp // Maps to our 'utc' time format
+                    });
+                }
+            });
+        };
+
+        openmct.telemetry.addProvider({
+            supportsSubscribe: function (domainObject) {
+                return domainObject.type === 'sdr.telemetry';
+            },
+            subscribe: function (domainObject, callback) {
+                const key = domainObject.identifier.key;
+                listeners[key] = callback;
+                return function unsubscribe() {
+                    delete listeners[key];
+                };
+            }
+        });
+    };
+}
